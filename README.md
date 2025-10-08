@@ -1,2 +1,2 @@
 # MaBe-2025-Challenge
-Sigma Skibdi
+This is a repo about the Mabe Challange
