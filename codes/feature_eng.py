@@ -1,7 +1,8 @@
 import os
-import panda as pd
+import pandas as pd
+import numpy as np
 
-def load_and_process_video(video_id, lab_id, data_path):
+def load_and_process_video(lab_id, video_id, data_path):
     tracking_path = os.path.join(data_path, 'train_tracking', lab_id, f'{video_id}.parquet')
     if not os.path.exists(tracking_path):
         return None
@@ -13,18 +14,13 @@ def load_and_process_video(video_id, lab_id, data_path):
     df_wide = pd.concat([pivot_x, pivot_y], axis=1).sort_index(axis=1)
     return df_wide
 
-def equalising_data(df,mouse,body_parts):
-    universal_columns = []
-    for i in mouse:
-        for j in body_parts:
-            universal_columns.append(f"{i}_{j}_x")
-            universal_columns.append(f"{i}_{j}_y")
-    new_df = pd.DataFrame()
-    for i in universal_columns:
-        if(i not in list(df.columns)):
-            x = pd.DataFrame({i: [np.nan]})
-            new_df = pd.concat([new_df, x],axis=1)
-        else:
-            new_df = pd.concat([new_df, df[i]],axis=1)
-    return new_df
-    
+def equalising_data(df,num_mouse,body_parts):
+    universal_columns = [f"mouse{m}_{bp}_{coord}" 
+                         for m in range(1,num_mouse+1) 
+                         for bp in body_parts 
+                         for coord in ['x', 'y']]
+    for col in universal_columns:
+        if col not in df.columns:
+            df[col] = np.nan
+    df = df.reindex(columns=universal_columns)
+    return df
