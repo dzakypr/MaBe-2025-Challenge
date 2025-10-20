@@ -1,6 +1,7 @@
 import os
 import pandas as pd
 import numpy as np
+import itertools
 
 def load_and_process_video(lab_id, video_id, data_path):
     tracking_path = os.path.join(data_path, 'train_tracking', lab_id, f'{video_id}.parquet')
