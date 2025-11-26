@@ -35,7 +35,7 @@ def tracked_body_parts():
  'tail_middle_2']
     return tracked_body_parts
 
-def load_and_process_video(lab_id, video_id, data_path):
+def load_and_process_video(lab_id, video_id, data_path, add_bp=None, drop_bp=None):
     tracking_path = os.path.join(data_path, 'train_tracking', lab_id, f'{video_id}.parquet')
     if not os.path.exists(tracking_path):
         return None
@@ -44,6 +44,30 @@ def load_and_process_video(lab_id, video_id, data_path):
     df_wide = df_long.pivot(index="video_frame", columns=["mouse_id", "bodypart"], values=["x","y"])
     df_wide.columns = df_wide.columns.swaplevel(0, 1)
     df_wide.columns = df_wide.columns.swaplevel(1, 2)
+    df_wide = df_wide.sort_index(axis=1)
+
+    if add_bp is not None:
+        new_nan_parts_list = []
+        for m_id in range(1, 5):
+            for part in add_bp:
+                if (m_id,part,'x') in df_wide.columns:
+                    continue
+                nan_cols = pd.MultiIndex.from_product(
+                    [[m_id], [part], ['x', 'y']],
+                    names=df_wide.columns.names
+                )
+
+                part_df = pd.DataFrame(
+                    np.nan,
+                    index=df_wide.index,
+                    columns=nan_cols
+                )
+                new_nan_parts_list.append(part_df)
+        if new_nan_parts_list:
+            df_wide = pd.concat([df_wide] + new_nan_parts_list, axis=1)
+
+    if drop_bp is not None:
+        df_wide = df_wide.drop(columns=drop_bp, level='bodypart', errors='ignore')
     df_wide = df_wide.sort_index(axis=1)
     return df_wide
 
@@ -75,17 +99,6 @@ def load_and_process_annotate(lab_id, video_id, path, inclusive=True):
 
     out['action'] = out['action'].astype('category')
     return out
-
-def equalising_data(df,num_mouse,body_parts):
-    universal_columns = [f"mouse{m}_{bp}_{coord}" 
-                         for m in range(1,num_mouse+1) 
-                         for bp in body_parts 
-                         for coord in ['x', 'y']]
-    for col in universal_columns:
-        if col not in df.columns:
-            df[col] = np.nan
-    df = df.reindex(columns=universal_columns)
-    return df
 
 def extract_tracked_body_parts(df):
     body_parts_tracked_str = df['body_parts_tracked'].unique()
