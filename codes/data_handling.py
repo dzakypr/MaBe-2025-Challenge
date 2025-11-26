@@ -41,13 +41,10 @@ def load_and_process_video(lab_id, video_id, data_path):
         return None
 
     df_long = pd.read_parquet(tracking_path)
-    pivot_x = df_long.pivot(index='video_frame', columns=['mouse_id', 'bodypart'], values='x')
-    pivot_y = df_long.pivot(index='video_frame', columns=['mouse_id', 'bodypart'], values='y')
-
-    pivot_x.columns = [f"mouse{m}_{bp}_x" for m, bp in pivot_x.columns]
-    pivot_y.columns = [f"mouse{m}_{bp}_y" for m, bp in pivot_y.columns]
-
-    df_wide = pd.concat([pivot_x, pivot_y], axis=1).sort_index(axis=1)
+    df_wide = df_long.pivot(index="video_frame", columns=["mouse_id", "bodypart"], values=["x","y"])
+    df_wide.columns = df_wide.columns.swaplevel(0, 1)
+    df_wide.columns = df_wide.columns.swaplevel(1, 2)
+    df_wide = df_wide.sort_index(axis=1)
     return df_wide
 
 def load_and_process_annotate(lab_id, video_id, path, inclusive=True):
