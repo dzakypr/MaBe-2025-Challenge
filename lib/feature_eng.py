@@ -480,3 +480,59 @@ def transform_pair(mouse_pair, body_parts_tracked, fps, output_dir, pair_name):
         gc.collect()
 
     return files_created
+
+def generate_features(df_wide, fps, output_dir, body_parts_map=None):
+
+    os.makedirs(output_dir, exist_ok=True)
+    
+    if body_parts_map:
+        df_wide = df_wide.rename(columns=body_parts_map, level='bodypart')
+    
+    # Cast input to float32 immediately to save space
+    df_wide = df_wide.astype(np.float32)
+    gc.collect()
+
+    mice_ids = df_wide.columns.unique(level='mouse_id')
+    available_parts = df_wide.columns.unique(level='bodypart').tolist()
+    
+    saved_files = []
+
+    # print(f"Starting Chunked Generation. Saving chunks to: {output_dir}")
+
+    # 1. Process Single Mice
+    for mouse in mice_ids:
+        print(f"Processing Mouse: {mouse}")
+        single_mouse_df = df_wide[mouse].copy()
+        
+        # Single feats are usually small enough to do in one go
+        feats = transform_single(single_mouse_df, available_parts, fps)
+        
+        feats.columns = pd.MultiIndex.from_product([[mouse], feats.columns], names=['mouse_id', 'feature'])
+        fname = os.path.join(output_dir, f"feats_single_{mouse}.parquet")
+        feats.to_parquet(fname)
+        saved_files.append(fname)
+        
+        del single_mouse_df
+        del feats
+        gc.collect()
+
+    # 2. Process Pairs (Using the new Chunked Function)
+    if len(mice_ids) > 1:
+        for mouse_A, mouse_B in itertools.combinations(mice_ids, 2):
+            pair_name = f"{mouse_A}_vs_{mouse_B}"
+            # print(f"Processing Pair: {pair_name}")
+            
+            pair_data = {
+                'A': df_wide[mouse_A].copy(),
+                'B': df_wide[mouse_B].copy()
+            }
+            
+            # This now returns a LIST of files (dist, vel, geo, dyn)
+            pair_files = transform_pair(pair_data, available_parts, fps, output_dir, pair_name)
+            saved_files.extend(pair_files)
+            
+            del pair_data
+            gc.collect()
+            
+    # print(f"Generation Complete. Created {len(saved_files)} chunk files.")
+    return saved_files
