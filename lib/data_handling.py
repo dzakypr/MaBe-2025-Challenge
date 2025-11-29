@@ -35,7 +35,7 @@ def tracked_body_parts():
  'tail_middle_2']
     return tracked_body_parts
 
-def load_and_process_video(lab_id, video_id, data_path, add_bp=None, drop_bp=None):
+def load_and_process_video(data_path, lab_id, video_id, pixel_per_cm, add_bp=None, drop_bp=None):
     tracking_path = os.path.join(data_path, 'train_tracking', lab_id, f'{video_id}.parquet')
     if not os.path.exists(tracking_path):
         return None
@@ -69,6 +69,7 @@ def load_and_process_video(lab_id, video_id, data_path, add_bp=None, drop_bp=Non
     if drop_bp is not None:
         df_wide = df_wide.drop(columns=drop_bp, level='bodypart', errors='ignore')
     df_wide = df_wide.sort_index(axis=1)
+    df_wide = df_wide / pixel_per_cm
     return df_wide
 
 def load_and_process_annotate(lab_id, video_id, path, inclusive=True):
