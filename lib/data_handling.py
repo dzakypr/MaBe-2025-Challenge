@@ -117,3 +117,77 @@ def extract_tracked_body_parts(df):
                 
     return body_parts_tracked_list
 
+import torch
+import pandas as pd
+import os
+import random
+import numpy as np
+from tqdm import tqdm
+
+def calculate_robust_stats(feature_root_dir, save_path="robust_stats.pt", sample_ratio=0.1):
+    """
+    Calculates Median and IQR (Interquartile Range) for Robust Scaling.
+    Uses Pandas to handle NaNs gracefully.
+    """
+    print(f"Scanning {feature_root_dir}...")
+    
+    files = []
+    for root, _, filenames in os.walk(feature_root_dir):
+        for f in filenames:
+            if f.endswith('.parquet'):
+                files.append(os.path.join(root, f))
+    
+    if not files:
+        print("No files found.")
+        return
+
+    # Randomly sample files to estimate stats
+    sample_size = max(1, int(len(files) * sample_ratio))
+    sampled_files = random.sample(files, sample_size)
+    print(f"Sampling {sample_size}/{len(files)} files for robust statistics...")
+
+    # We iterate and build a large DataFrame/Array for accurate quantiles
+    # To save memory, we only take a subset of frames from each file
+    sampled_data = []
+
+    for f in tqdm(sampled_files):
+        try:
+            df = pd.read_parquet(f)
+            # Downsample frames (every 10th frame) to fit in RAM
+            # Pandas handles the mixed types/NaNs better here
+            subset = df.iloc[::10].select_dtypes(include=[np.number])
+            sampled_data.append(subset)
+        except Exception as e:
+            print(f"Skipping {f}: {e}")
+
+    if not sampled_data:
+        print("No valid data found.")
+        return
+
+    print("Concatenating samples...")
+    full_df = pd.concat(sampled_data, axis=0)
+    
+    print(f"Computing quantiles on shape: {full_df.shape}")
+    
+    # Calculate quantiles ignoring NaNs
+    # This ensures a missing tail point doesn't break the scaler
+    median_series = full_df.median()
+    q25_series = full_df.quantile(0.25)
+    q75_series = full_df.quantile(0.75)
+    
+    iqr_series = q75_series - q25_series
+    
+    # Safety: Prevent division by zero
+    iqr_series = iqr_series.replace(0, 1.0)
+
+    # Convert to PyTorch Tensors for the loader
+    stats = {
+        "median": torch.tensor(median_series.values, dtype=torch.float32),
+        "iqr": torch.tensor(iqr_series.values, dtype=torch.float32)
+    }
+    
+    torch.save(stats, save_path)
+    print(f"Robust stats saved to {save_path}")
+
+# --- Usage ---
+# calculate_robust_stats("/content/drive/Shareddrives/Feature", "robust_stats.pt")
