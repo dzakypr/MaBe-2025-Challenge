@@ -497,7 +497,7 @@ def generate_features(df_wide, fps, output_dir, body_parts_map=None):
     
     saved_files = []
 
-    # print(f"Starting Chunked Generation. Saving chunks to: {output_dir}")
+    print(f"Starting Single Generation. Saving chunks to: {output_dir}")
 
     # 1. Process Single Mice
     for mouse in mice_ids:
@@ -517,22 +517,22 @@ def generate_features(df_wide, fps, output_dir, body_parts_map=None):
         gc.collect()
 
     # 2. Process Pairs (Using the new Chunked Function)
-    if len(mice_ids) > 1:
-        for mouse_A, mouse_B in itertools.combinations(mice_ids, 2):
-            pair_name = f"{mouse_A}_vs_{mouse_B}"
-            # print(f"Processing Pair: {pair_name}")
+    # if len(mice_ids) > 1:
+    #     for mouse_A, mouse_B in itertools.combinations(mice_ids, 2):
+    #         pair_name = f"{mouse_A}_vs_{mouse_B}"
+    #         # print(f"Processing Pair: {pair_name}")
             
-            pair_data = {
-                'A': df_wide[mouse_A].copy(),
-                'B': df_wide[mouse_B].copy()
-            }
+    #         pair_data = {
+    #             'A': df_wide[mouse_A].copy(),
+    #             'B': df_wide[mouse_B].copy()
+    #         }
             
-            # This now returns a LIST of files (dist, vel, geo, dyn)
-            pair_files = transform_pair(pair_data, available_parts, fps, output_dir, pair_name)
-            saved_files.extend(pair_files)
+    #         # This now returns a LIST of files (dist, vel, geo, dyn)
+    #         pair_files = transform_pair(pair_data, available_parts, fps, output_dir, pair_name)
+    #         saved_files.extend(pair_files)
             
-            del pair_data
-            gc.collect()
+    #         del pair_data
+    #         gc.collect()
             
     # print(f"Generation Complete. Created {len(saved_files)} chunk files.")
     return saved_files
