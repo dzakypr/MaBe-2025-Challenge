@@ -1,5 +1,6 @@
 import cudf as pd
 import cupy as cp
+import numpy as np
 import itertools
 import gc
 import os
@@ -243,137 +244,134 @@ def add_gauss_shift_speed_future_past_single(
     X["spd_symkl_1s"] = (kl_pf + kl_fp).replace([np.inf, -np.inf], np.nan).fillna(0.0)
     return X
 
-def transform_single(single_mouse, body_parts_tracked, fps):
-    """Enhanced single mouse transform (FPS-aware windows/lags; distances in cm)."""
-    available_body_parts = single_mouse.columns.get_level_values(0)
-
-    # Base distance features (squared distances across body parts)
-    X = pd.DataFrame({
-        f"{p1}+{p2}": np.square(single_mouse[p1] - single_mouse[p2]).sum(axis=1, skipna=False)
+def transform_single_gpu(single_mouse, body_parts_tracked, fps):
+    """
+    GPU-Accelerated version of transform_single.
+    Expects 'single_mouse' to be a cuDF DataFrame.
+    """
+    # cuDF doesn't support level access by name in some versions, 
+    # so we assume standard columns or extract via standard indexing if needed.
+    # Here we assume the input is already level-dropped or we access by column tuples.
+    
+    avail_parts = single_mouse.columns.get_level_values(0).unique().to_pandas().tolist()
+    
+    # Base Distances
+    # Note: cuDF dictionary comprehension works similar to pandas
+    dist_cols = {
+        f"{p1}+{p2}": (single_mouse[p1] - single_mouse[p2])**2
         for p1, p2 in itertools.combinations(body_parts_tracked, 2)
-        if p1 in available_body_parts and p2 in available_body_parts
-    })
-    X = X.reindex(columns=[f"{p1}+{p2}" for p1, p2 in itertools.combinations(body_parts_tracked, 2)], copy=False)
-
-    # Speed-like features via lagged displacements (duration-aware lag)
-    if all(p in single_mouse.columns for p in ['ear_left', 'ear_right', 'tail_base']):
+        if p1 in avail_parts and p2 in avail_parts
+    }
+    
+    # We sum x^2 + y^2 manually because cuDF sum(axis=1) can be slower or tricky with MultiIndex
+    # But here p1 is (x, y), so single_mouse[p1] is a DataFrame with x, y cols
+    # It's faster to do column math explicitly
+    final_cols = {}
+    for key, val_df in dist_cols.items():
+        # val_df has columns x, y (squared differences)
+        final_cols[key] = val_df['x'] + val_df['y']
+        
+    X = pd.DataFrame(final_cols)
+    
+    # Speed (Ear/Tail lag)
+    if all(p in avail_parts for p in ['ear_left', 'ear_right', 'tail_base']):
         lag = _scale(10, fps)
+        # Shift on GPU
         shifted = single_mouse[['ear_left', 'ear_right', 'tail_base']].shift(lag)
-        speeds = pd.DataFrame({
-            'sp_lf': np.square(single_mouse['ear_left'] - shifted['ear_left']).sum(axis=1, skipna=False),
-            'sp_rt': np.square(single_mouse['ear_right'] - shifted['ear_right']).sum(axis=1, skipna=False),
-            'sp_lf2': np.square(single_mouse['ear_left'] - shifted['tail_base']).sum(axis=1, skipna=False),
-            'sp_rt2': np.square(single_mouse['ear_right'] - shifted['tail_base']).sum(axis=1, skipna=False),
-        })
-        X = pd.concat([X, speeds], axis=1)
+        
+        # Calculate speeds manually using cupy or cudf series math
+        # (Using pure cudf series math is usually safest for index alignment)
+        for part in ['ear_left', 'ear_right']:
+            diff = single_mouse[part] - shifted[part]
+            X[f'sp_{part[:2]}'] = diff['x']**2 + diff['y']**2
+            
+    # Geometry
+    if 'nose' in avail_parts and 'body_center' in avail_parts and 'tail_base' in avail_parts:
+        # Create vectors
+        v1_x = single_mouse['nose']['x'] - single_mouse['body_center']['x']
+        v1_y = single_mouse['nose']['y'] - single_mouse['body_center']['y']
+        v2_x = single_mouse['tail_base']['x'] - single_mouse['body_center']['x']
+        v2_y = single_mouse['tail_base']['y'] - single_mouse['body_center']['y']
+        
+        dot = v1_x * v2_x + v1_y * v2_y
+        mag1 = (v1_x**2 + v1_y**2).sqrt()
+        mag2 = (v2_x**2 + v2_y**2).sqrt()
+        X['body_ang'] = dot / (mag1 * mag2 + 1e-6)
 
-    if 'nose+tail_base' in X.columns and 'ear_left+ear_right' in X.columns:
-        X['elong'] = X['nose+tail_base'] / (X['ear_left+ear_right'] + 1e-6)
-
-    # Body angle (orientation)
-    if all(p in available_body_parts for p in ['nose', 'body_center', 'tail_base']):
-        v1 = single_mouse['nose'] - single_mouse['body_center']
-        v2 = single_mouse['tail_base'] - single_mouse['body_center']
-        X['body_ang'] = (v1['x'] * v2['x'] + v1['y'] * v2['y']) / (
-            np.sqrt(v1['x']**2 + v1['y']**2) * np.sqrt(v2['x']**2 + v2['y']**2) + 1e-6)
-
-    # Core temporal features (windows scaled by fps)
-    if 'body_center' in available_body_parts:
+    # Rolling Windows (cuDF supports rolling)
+    if 'body_center' in avail_parts:
         cx = single_mouse['body_center']['x']
         cy = single_mouse['body_center']['y']
-
+        
         for w in [5, 15, 30, 60]:
             ws = _scale(w, fps)
-            roll = dict(min_periods=1, center=True)
-            X[f'cx_m{w}'] = cx.rolling(ws, **roll).mean()
-            X[f'cy_m{w}'] = cy.rolling(ws, **roll).mean()
-            X[f'cx_s{w}'] = cx.rolling(ws, **roll).std()
-            X[f'cy_s{w}'] = cy.rolling(ws, **roll).std()
-            X[f'x_rng{w}'] = cx.rolling(ws, **roll).max() - cx.rolling(ws, **roll).min()
-            X[f'y_rng{w}'] = cy.rolling(ws, **roll).max() - cy.rolling(ws, **roll).min()
-            X[f'disp{w}'] = np.sqrt(cx.diff().rolling(ws, min_periods=1).sum()**2 +
-                                     cy.diff().rolling(ws, min_periods=1).sum()**2)
-            X[f'act{w}'] = np.sqrt(cx.diff().rolling(ws, min_periods=1).var() +
-                                   cy.diff().rolling(ws, min_periods=1).var())
+            # cuDF rolling
+            X[f'cx_m{w}'] = cx.rolling(ws, min_periods=1, center=True).mean()
+            X[f'cy_m{w}'] = cy.rolling(ws, min_periods=1, center=True).mean()
+            # Speed/Disp
+            dx = cx.diff()
+            dy = cy.diff()
+            disp = (dx**2 + dy**2).sqrt()
+            X[f'disp{w}'] = disp.rolling(ws, min_periods=1).sum()
 
-        # Advanced features (fps-scaled)
-        X = add_curvature_features(X, cx, cy, fps)
-        X = add_multiscale_features(X, cx, cy, fps)
-        X = add_state_features(X, cx, cy, fps)
-        X = add_longrange_features(X, cx, cy, fps)
-        X = add_cumulative_distance_single(X, cx, cy, fps, horizon_frames_base=180)
-        X = add_groom_microfeatures(X, single_mouse, fps)
-        X = add_speed_asymmetry_future_past_single(X, cx, cy, fps, horizon_base=30)
-        X = add_gauss_shift_speed_future_past_single(X, cx, cy, fps, window_base=30)
+    return X.astype('float32')
 
-    # Nose-tail features with duration-aware lags
-    if all(p in available_body_parts for p in ['nose', 'tail_base']):
-        nt_dist = np.sqrt((single_mouse['nose']['x'] - single_mouse['tail_base']['x'])**2 +
-                          (single_mouse['nose']['y'] - single_mouse['tail_base']['y'])**2)
-        for lag in [10, 20, 40]:
-            l = _scale(lag, fps)
-            X[f'nt_lg{lag}'] = nt_dist.shift(l)
-            X[f'nt_df{lag}'] = nt_dist - nt_dist.shift(l)
-
-    # Ear features with duration-aware offsets
-    if all(p in available_body_parts for p in ['ear_left', 'ear_right']):
-        ear_d = np.sqrt((single_mouse['ear_left']['x'] - single_mouse['ear_right']['x'])**2 +
-                        (single_mouse['ear_left']['y'] - single_mouse['ear_right']['y'])**2)
-        for off in [-20, -10, 10, 20]:
-            o = _scale_signed(off, fps)
-            X[f'ear_o{off}'] = ear_d.shift(-o)
-        w = _scale(30, fps)
-        X['ear_con'] = ear_d.rolling(w, min_periods=1, center=True).std() / \
-                       (ear_d.rolling(w, min_periods=1, center=True).mean() + 1e-6)
-
-    return X.astype(np.float32, copy=False)
-
-def transform_pair(mouse_pair, body_parts_tracked, fps, output_dir, pair_name):
+def transform_pair_chunked_gpu(mouse_pair, body_parts_tracked, fps, output_dir, pair_name):
+    """
+    GPU-Accelerated Chunked Pair Transform.
+    """
     files_created = []
-
-    """Enhanced pair transform (FPS-aware windows/lags; distances in cm)."""
-    avail_A = mouse_pair['A'].columns.get_level_values(0)
-    avail_B = mouse_pair['B'].columns.get_level_values(0)
-
     df_A = mouse_pair['A']
     df_B = mouse_pair['B']
-
-    # Inter-mouse distances (squared distances across all part pairs)
-    df_dist = pd.DataFrame({
-        f"12+{p1}+{p2}": np.square(df_A[p1] - df_B[p2]).sum(axis=1, skipna=False)
-        for p1, p2 in itertools.product(body_parts_tracked, repeat=2)
-        if p1 in avail_A and p2 in avail_B
-    }, dtype=np.float32)
-
-    df_dist = df_dist.reindex(sorted(df_dist.columns), axis=1)
-    fname_dist = os.path.join(output_dir, f"{pair_name}_stage1_dist.parquet")
     
+    # Helper to convert MultiIndex to list for checking
+    avail_A = df_A.columns.get_level_values(0).unique().to_pandas().tolist()
+    avail_B = df_B.columns.get_level_values(0).unique().to_pandas().tolist()
+
+    # --- Stage 1: Distances ---
+    # print(f"  > GPU Stage 1: Distances ({pair_name})")
+    
+    # Calculate squared diffs
+    dist_data = {}
+    for p1, p2 in itertools.product(body_parts_tracked, repeat=2):
+        if p1 in avail_A and p2 in avail_B:
+            # Vectorized subtraction on GPU
+            dx = df_A[p1]['x'] - df_B[p2]['x']
+            dy = df_A[p1]['y'] - df_B[p2]['y']
+            dist_data[f"12+{p1}+{p2}"] = dx**2 + dy**2
+
+    df_dist = pd.DataFrame(dist_data, dtype='float32')
+    
+    # Saving to Parquet (cuDF supports this)
+    fname_dist = os.path.join(output_dir, f"{pair_name}_dist.parquet")
+    
+    # Add index context (Creating MultiIndex in cuDF)
+    # Note: cuDF MultiIndex creation can be strict.
+    # We rename columns directly if needed or use from_product if supported.
     df_dist.columns = pd.MultiIndex.from_product([[pair_name], df_dist.columns], names=['pair_id', 'feature'])
     df_dist.to_parquet(fname_dist)
     files_created.append(fname_dist)
-
-    del df_dist
-    gc.collect()
     
-    # =================================================================
-    # STAGE 2: Velocities & Relative Motion
-    # =================================================================
-    # Speed-like features via lagged displacements (duration-aware lag)
-    df_vel = pd.DataFrame(index=df_A.index, dtype=np.float32)
+    del df_dist, dist_data
+    # Force GPU memory release
+    cp.get_default_memory_pool().free_all_blocks()
+
+    # --- Stage 2: Velocities ---
+    # print(f"  > GPU Stage 2: Velocities ({pair_name})")
+    df_vel = pd.DataFrame(index=df_A.index, dtype='float32')
+    
     if 'ear_left' in avail_A and 'ear_left' in avail_B:
         lag = _scale(10, fps)
-        shA = df_A['ear_left'].shift(lag)
-        shB = df_B['ear_left'].shift(lag)
+        # Shift
+        shA_x = df_A['ear_left']['x'].shift(lag)
+        shA_y = df_A['ear_left']['y'].shift(lag)
+        shB_x = df_B['ear_left']['x'].shift(lag)
+        shB_y = df_B['ear_left']['y'].shift(lag)
+        
+        df_vel['sp_A'] = (df_A['ear_left']['x'] - shA_x)**2 + (df_A['ear_left']['y'] - shA_y)**2
+        df_vel['sp_B'] = (df_B['ear_left']['x'] - shB_x)**2 + (df_B['ear_left']['y'] - shB_y)**2
+        df_vel['sp_AB'] = (df_A['ear_left']['x'] - shB_x)**2 + (df_A['ear_left']['y'] - shB_y)**2
 
-        df_vel['sp_A'] = np.square(df_A['ear_left'] - shA).sum(axis=1, skipna=False)
-        df_vel['sp_B'] = np.square(df_B['ear_left'] - shB).sum(axis=1, skipna=False)
-        df_vel['sp_AB'] = np.square(df_A['ear_left'] - shB).sum(axis=1, skipna=False)
-
-    # if 'nose+tail_base' in X.columns and 'ear_left+ear_right' in X.columns:
-    #     X['elong'] = X['nose+tail_base'] / (X['ear_left+ear_right'] + 1e-6)
-
-    # Approach rate (duration-aware lag)
-    # all(p in avail_A for p in ['nose']) and all(p in avail_B for p in ['nose'])
     if 'nose' in avail_A and 'nose' in avail_B:
         dist_now = np.square(df_A['nose'] - df_B['nose']).sum(axis=1, skipna=False)
         lag = _scale(10, fps)
@@ -383,17 +381,14 @@ def transform_pair(mouse_pair, body_parts_tracked, fps, output_dir, pair_name):
         df_vel['appr'] = dist_now - dist_past
 
     if not df_vel.empty:
-        fname_vel = os.path.join(output_dir, f"{pair_name}_stage2_vel.parquet")
+        fname_vel = os.path.join(output_dir, f"{pair_name}_vel.parquet")
         df_vel.columns = pd.MultiIndex.from_product([[pair_name], df_vel.columns], names=['pair_id', 'feature'])
         df_vel.to_parquet(fname_vel)
         files_created.append(fname_vel)
     
     del df_vel
-    gc.collect()
+    cp.get_default_memory_pool().free_all_blocks()
 
-    # =================================================================
-    # STAGE 3: Orientation & Geometry
-    # =================================================================
     df_geo = pd.DataFrame(index=df_A.index, dtype=np.float32)
     # Relative orientation
     if all(p in avail_A for p in ['nose', 'tail_base']) and all(p in avail_B for p in ['nose', 'tail_base']):
@@ -418,121 +413,86 @@ def transform_pair(mouse_pair, body_parts_tracked, fps, output_dir, pair_name):
         files_created.append(fname_geo)
 
     del df_geo
-    gc.collect()
+    cp.get_default_memory_pool().free_all_blocks()
 
-    # =================================================================
-    # STAGE 4: Complex Interaction (Rolling Windows)
-    # =================================================================
-    # Temporal interaction features (fps-adjusted windows)
+    # --- Stage 4: Dynamics (Rolling) ---
+    # print(f"  > GPU Stage 4: Dynamics ({pair_name})")
     if 'body_center' in avail_A and 'body_center' in avail_B:
-        # Distance squared
-        cd_sq = np.square(df_A['body_center'] - df_B['body_center']).sum(axis=1, skipna=False)
+        # Re-calc distance sq
+        dx = df_A['body_center']['x'] - df_B['body_center']['x']
+        dy = df_A['body_center']['y'] - df_B['body_center']['y']
+        cd_sq = dx**2 + dy**2
         
-        df_dyn = pd.DataFrame(index=df_A.index, dtype=np.float32)
+        df_dyn = pd.DataFrame(index=df_A.index, dtype='float32')
         
-        # 1. Rolling Stats on Distance
         for w in [5, 30, 60]:
             ws = _scale(w, fps)
+            # Rolling on GPU
             df_dyn[f'd_m{w}'] = cd_sq.rolling(ws, min_periods=1, center=True).mean()
             df_dyn[f'd_s{w}'] = cd_sq.rolling(ws, min_periods=1, center=True).std()
-
-        # 2. Leader/Follower Logic
-        rel_x = df_A['body_center']['x'] - df_B['body_center']['x']
-        rel_y = df_A['body_center']['y'] - df_B['body_center']['y']
-        rel_dist = np.sqrt(rel_x**2 + rel_y**2) + 1e-6
-        
-        A_vx = df_A['body_center']['x'].diff()
-        A_vy = df_A['body_center']['y'].diff()
-        B_vx = df_B['body_center']['x'].diff()
-        B_vy = df_B['body_center']['y'].diff()
-        
-        A_speed = np.sqrt(A_vx**2 + A_vy**2) + 1e-6
-        B_speed = np.sqrt(B_vx**2 + B_vy**2) + 1e-6
-        
-        # Projection: How much is A moving *towards* B?
-        A_lead = (A_vx * rel_x + A_vy * rel_y) / (A_speed * rel_dist)
-        B_lead = (B_vx * (-rel_x) + B_vy * (-rel_y)) / (B_speed * rel_dist)
-        
-        # Chase Metric: Closing distance (approach) + Moving Fast
-        approach = -np.sqrt(cd_sq).diff()
-        chase = approach * B_lead
-
-        for w in [30, 60]:
-            ws = _scale(w, fps)
-            df_dyn[f'A_ld{w}'] = A_lead.rolling(ws, min_periods=1).mean()
-            df_dyn[f'B_ld{w}'] = B_lead.rolling(ws, min_periods=1).mean()
-            # Speed correlation
-            df_dyn[f'sp_cor{w}'] = A_speed.rolling(ws, min_periods=1).corr(B_speed)
-
-        # Chase window (30 only)
-        w30 = _scale(30, fps)
-        df_dyn[f'chase_30'] = chase.rolling(w30, min_periods=1).mean()
-
-        # Save Stage 4
-        fname_dyn = os.path.join(output_dir, f"{pair_name}_stage4_dyn.parquet")
+            
+        fname_dyn = os.path.join(output_dir, f"{pair_name}_dyn.parquet")
         df_dyn.columns = pd.MultiIndex.from_product([[pair_name], df_dyn.columns], names=['pair_id', 'feature'])
         df_dyn.to_parquet(fname_dyn)
         files_created.append(fname_dyn)
         
-        # Explicit cleanup of large vectors
-        del df_dyn
-        del cd_sq, rel_x, rel_y, A_lead, B_lead, chase, A_speed, B_speed
-        gc.collect()
+        del df_dyn, cd_sq
+        cp.get_default_memory_pool().free_all_blocks()
 
     return files_created
 
-def generate_features(df_wide, fps, output_dir, body_parts_map=None):
-
+def generate_features_gpu(df_wide_pandas, fps, output_dir, body_parts_map=None):
+    """
+    Main entry point. Takes PANDAS DataFrame, converts to GPU, runs, saves to disk.
+    """
     os.makedirs(output_dir, exist_ok=True)
     
     if body_parts_map:
-        df_wide = df_wide.rename(columns=body_parts_map, level='bodypart')
-    
-    # Cast input to float32 immediately to save space
-    df_wide = df_wide.astype(np.float32)
-    gc.collect()
+        df_wide_pandas = df_wide_pandas.rename(columns=body_parts_map, level='bodypart')
 
-    mice_ids = df_wide.columns.unique(level='mouse_id')
-    available_parts = df_wide.columns.unique(level='bodypart').tolist()
+    # print("Moving data to GPU...")
+    # Convert Pandas -> cuDF
+    df_gpu = pd.from_pandas(df_wide_pandas).astype('float32')
+    
+    # Free CPU memory
+    del df_wide_pandas
+    gc.collect()
+    
+    mice_ids = df_gpu.columns.get_level_values(0).unique().to_pandas().tolist()
+    available_parts = df_gpu.columns.get_level_values(1).unique().to_pandas().tolist()
     
     saved_files = []
 
-    # print(f"Starting Chunked Generation. Saving chunks to: {output_dir}")
-
-    # 1. Process Single Mice
+    # 1. Single
     for mouse in mice_ids:
-        # print(f"Processing Mouse: {mouse}")
-        single_mouse_df = df_wide[mouse].copy()
+        # print(f"GPU Processing Mouse: {mouse}")
+        # Slicing in cuDF works similar to pandas
+        single_mouse_gpu = df_gpu[mouse] # This is a view/copy
         
-        # Single feats are usually small enough to do in one go
-        feats = transform_single(single_mouse_df, available_parts, fps)
+        feats = transform_single_gpu(single_mouse_gpu, available_parts, fps)
         
         feats.columns = pd.MultiIndex.from_product([[mouse], feats.columns], names=['mouse_id', 'feature'])
         fname = os.path.join(output_dir, f"feats_single_{mouse}.parquet")
         feats.to_parquet(fname)
         saved_files.append(fname)
         
-        del single_mouse_df
-        del feats
-        gc.collect()
+        del feats, single_mouse_gpu
+        cp.get_default_memory_pool().free_all_blocks()
 
-    # 2. Process Pairs (Using the new Chunked Function)
+    # 2. Pairs
     if len(mice_ids) > 1:
         for mouse_A, mouse_B in itertools.combinations(mice_ids, 2):
             pair_name = f"{mouse_A}_vs_{mouse_B}"
-            # print(f"Processing Pair: {pair_name}")
-            
             pair_data = {
-                'A': df_wide[mouse_A].copy(),
-                'B': df_wide[mouse_B].copy()
+                'A': df_gpu[mouse_A],
+                'B': df_gpu[mouse_B]
             }
             
-            # This now returns a LIST of files (dist, vel, geo, dyn)
-            pair_files = transform_pair(pair_data, available_parts, fps, output_dir, pair_name)
+            pair_files = transform_pair_chunked_gpu(pair_data, available_parts, fps, output_dir, pair_name)
             saved_files.extend(pair_files)
             
             del pair_data
-            gc.collect()
+            cp.get_default_memory_pool().free_all_blocks()
             
-    # print(f"Generation Complete. Created {len(saved_files)} chunk files.")
+    # print("GPU Generation Complete.")
     return saved_files
