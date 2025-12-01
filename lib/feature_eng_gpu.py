@@ -27,9 +27,16 @@ def flatten_columns(df):
     Flattens MultiIndex columns to string for Parquet compatibility.
     Example: ('Mouse1', 'speed') -> 'Mouse1_speed'
     """
-    if isinstance(df.columns, pd.MultiIndex):
-        # Convert index to host (Pandas) to perform string joining efficiently
-        new_cols = ['_'.join(map(str, col)).strip() for col in df.columns.to_pandas()]
+    # Robust check: if nlevels > 1, it's a MultiIndex (works on cuDF and Pandas)
+    if hasattr(df.columns, 'nlevels') and df.columns.nlevels > 1:
+        # Try to pull columns to CPU list safely
+        try:
+            cols = df.columns.to_pandas().tolist()
+        except AttributeError:
+            # Fallback for older cuDF versions
+            cols = list(df.columns)
+            
+        new_cols = ['_'.join(map(str, col)).strip() for col in cols]
         df.columns = new_cols
     return df
 
