@@ -19,7 +19,8 @@ def _speed_gpu(cx, cy, fps):
     # Calculate Euclidean speed on GPU
     dx = cx.diff().fillna(0.0)
     dy = cy.diff().fillna(0.0)
-    return (dx**2 + dy**2).sqrt() * float(fps)
+    # FIX: Use **0.5 instead of .sqrt() for compatibility
+    return (dx**2 + dy**2)**0.5 * float(fps)
 
 # --- Advanced Feature Helpers (GPU Ported) ---
 
@@ -34,7 +35,8 @@ def add_curvature_features_gpu(X, cx, cy, fps):
 
     # 3. Cross Product (2D)
     cross_prod = vel_x * acc_y - vel_y * acc_x
-    vel_mag = (vel_x**2 + vel_y**2).sqrt()
+    # FIX: Use **0.5
+    vel_mag = (vel_x**2 + vel_y**2)**0.5
     
     # Avoid div by zero
     curvature = cross_prod.abs() / (vel_mag**3 + 1e-6)
@@ -117,15 +119,11 @@ def add_longrange_features_gpu(X, cx, cy, fps):
     # EWM
     for span in [60, 120]:
         s = _scale(span, fps)
-        X[f'x_e{span}'] = cx.ewm(span=s, min_periods=1).mean()
-        X[f'y_e{span}'] = cy.ewm(span=s, min_periods=1).mean()
+        # FIX: Removed min_periods=1 argument as cuDF ewm() does not support it
+        X[f'x_e{span}'] = cx.ewm(span=s).mean()
+        X[f'y_e{span}'] = cy.ewm(span=s).mean()
         
     speed = _speed_gpu(cx, cy, fps)
-    
-    # Percentile Rank (rolling rank) is expensive.
-    # cuDF does NOT support rolling().rank() natively in all versions.
-    # Skipping rolling rank for GPU efficiency unless absolutely required.
-    # Instead, we add simple global rank or max ratio
     
     return X
 
@@ -152,7 +150,8 @@ def add_groom_microfeatures_gpu(X, single_mouse_df, fps):
     # Nose Radius variability
     dx = nx - cx
     dy = ny - cy
-    r = (dx**2 + dy**2).sqrt()
+    # FIX: Use **0.5
+    r = (dx**2 + dy**2)**0.5
     X['nose_rad_std'] = r.rolling(w30, min_periods=max(1, w30//3)).std().fillna(0)
     
     return X
@@ -198,8 +197,9 @@ def transform_single_gpu(single_mouse, body_parts_tracked, fps):
         v2_y = single_mouse['tail_base']['y'] - single_mouse['body_center']['y']
         
         dot = v1_x * v2_x + v1_y * v2_y
-        mag1 = (v1_x**2 + v1_y**2).sqrt()
-        mag2 = (v2_x**2 + v2_y**2).sqrt()
+        # FIX: Use **0.5 instead of .sqrt()
+        mag1 = (v1_x**2 + v1_y**2)**0.5
+        mag2 = (v2_x**2 + v2_y**2)**0.5
         X['body_ang'] = dot / (mag1 * mag2 + 1e-6)
 
     # 4. Core Rolling Stats
@@ -213,12 +213,13 @@ def transform_single_gpu(single_mouse, body_parts_tracked, fps):
             X[f'cy_m{w}'] = cy.rolling(ws, min_periods=1, center=True).mean()
             dx = cx.diff()
             dy = cy.diff()
-            disp = (dx**2 + dy**2).sqrt()
+            # FIX: Use **0.5 instead of .sqrt()
+            disp = (dx**2 + dy**2)**0.5
             X[f'disp{w}'] = disp.rolling(ws, min_periods=1).sum()
             
             # Activity (Variance of velocity)
-            # var on gpu
-            X[f'act{w}'] = (dx**2 + dy**2).rolling(ws, min_periods=1).var().sqrt()
+            # FIX: Use **0.5 instead of .sqrt()
+            X[f'act{w}'] = (dx**2 + dy**2).rolling(ws, min_periods=1).var()**0.5
 
         # 5. CALL ADVANCED HELPERS
         # Only call if we have body_center (which we do inside this block)
@@ -234,7 +235,8 @@ def transform_single_gpu(single_mouse, body_parts_tracked, fps):
     if 'nose' in avail_parts and 'tail_base' in avail_parts:
         nt_dx = single_mouse['nose']['x'] - single_mouse['tail_base']['x']
         nt_dy = single_mouse['nose']['y'] - single_mouse['tail_base']['y']
-        nt_dist = (nt_dx**2 + nt_dy**2).sqrt()
+        # FIX: Use **0.5 instead of .sqrt()
+        nt_dist = (nt_dx**2 + nt_dy**2)**0.5
         
         for lag in [10, 20, 40]:
             l = _scale(lag, fps)
@@ -292,6 +294,7 @@ def transform_pair_chunked_gpu(mouse_pair, body_parts_tracked, fps, output_dir, 
 
     # Approach
     if 'nose' in avail_A and 'nose' in avail_B:
+         # Use vectorized math, avoid .values if possible to keep series
          dist_now = (df_A['nose']['x'] - df_B['nose']['x'])**2 + (df_A['nose']['y'] - df_B['nose']['y'])**2
          lag = _scale(10, fps)
          
@@ -324,8 +327,9 @@ def transform_pair_chunked_gpu(mouse_pair, body_parts_tracked, fps, output_dir, 
         dir_B_y = df_B['nose']['y'] - df_B['tail_base']['y']
         
         dot = dir_A_x * dir_B_x + dir_A_y * dir_B_y
-        mag_A = (dir_A_x**2 + dir_A_y**2).sqrt()
-        mag_B = (dir_B_x**2 + dir_B_y**2).sqrt()
+        # FIX: Use **0.5
+        mag_A = (dir_A_x**2 + dir_A_y**2)**0.5
+        mag_B = (dir_B_x**2 + dir_B_y**2)**0.5
         
         df_geo['rel_ori'] = dot / (mag_A * mag_B + 1e-6)
 
