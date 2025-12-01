@@ -35,6 +35,25 @@ def tracked_body_parts():
  'tail_middle_2']
     return tracked_body_parts
 
+def center_data_without_metadata(df_wide):
+    all_x = df_wide.xs('x', level='coords', axis=1).values.flatten()
+    all_y = df_wide.xs('y', level='coords', axis=1).values.flatten()
+
+    min_x = np.nanpercentile(all_x, 1)
+    max_x = np.nanpercentile(all_x, 99)
+    
+    min_y = np.nanpercentile(all_y, 1)
+    max_y = np.nanpercentile(all_y, 99)
+    
+    center_x = (min_x + max_x) / 2
+    center_y = (min_y + max_y) / 2
+    
+    df_wide.loc[:, (slice(None), slice(None), 'x')] -= center_x
+    df_wide.loc[:, (slice(None), slice(None), 'y')] -= center_y
+    
+    return df_wide
+
+
 def load_and_process_video(data_path, lab_id, video_id, pixel_per_cm, add_bp=None, drop_bp=None):
     tracking_path = os.path.join(data_path, 'train_tracking', lab_id, f'{video_id}.parquet')
     if not os.path.exists(tracking_path):
