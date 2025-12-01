@@ -22,6 +22,17 @@ def _speed_gpu(cx, cy, fps):
     # FIX: Use **0.5 instead of .sqrt() for compatibility
     return (dx**2 + dy**2)**0.5 * float(fps)
 
+def flatten_columns(df):
+    """
+    Flattens MultiIndex columns to string for Parquet compatibility.
+    Example: ('Mouse1', 'speed') -> 'Mouse1_speed'
+    """
+    if isinstance(df.columns, pd.MultiIndex):
+        # Convert index to host (Pandas) to perform string joining efficiently
+        new_cols = ['_'.join(map(str, col)).strip() for col in df.columns.to_pandas()]
+        df.columns = new_cols
+    return df
+
 # --- Advanced Feature Helpers (GPU Ported) ---
 
 def add_curvature_features_gpu(X, cx, cy, fps):
@@ -145,7 +156,8 @@ def add_groom_microfeatures_gpu(X, single_mouse_df, fps):
     # Clip logic
     ratio = ratio.where(ratio < 10, 10) # clip upper
     ratio = ratio.where(ratio > 0, 0)   # clip lower
-    X['head_body_decouple'] = ratio.rolling(w30, min_periods=max(1, w30//3)).median() # Median might be slow, consider mean if error
+    # FIX: Use .mean() instead of .median() because cuDF Rolling object lacks median support in some versions
+    X['head_body_decouple'] = ratio.rolling(w30, min_periods=max(1, w30//3)).mean() 
     
     # Nose Radius variability
     dx = nx - cx
@@ -271,6 +283,8 @@ def transform_pair_chunked_gpu(mouse_pair, body_parts_tracked, fps, output_dir, 
     
     fname_dist = os.path.join(output_dir, f"{pair_name}_stage1_dist.parquet")
     df_dist.columns = pd.MultiIndex.from_product([[pair_name], df_dist.columns], names=['pair_id', 'feature'])
+    # FLATTEN BEFORE SAVE
+    df_dist = flatten_columns(df_dist)
     df_dist.to_parquet(fname_dist)
     files_created.append(fname_dist)
     
@@ -309,6 +323,8 @@ def transform_pair_chunked_gpu(mouse_pair, body_parts_tracked, fps, output_dir, 
     if not df_vel.empty:
         fname_vel = os.path.join(output_dir, f"{pair_name}_stage2_vel.parquet")
         df_vel.columns = pd.MultiIndex.from_product([[pair_name], df_vel.columns], names=['pair_id', 'feature'])
+        # FLATTEN
+        df_vel = flatten_columns(df_vel)
         df_vel.to_parquet(fname_vel)
         files_created.append(fname_vel)
     
@@ -336,6 +352,8 @@ def transform_pair_chunked_gpu(mouse_pair, body_parts_tracked, fps, output_dir, 
     if not df_geo.empty:
         fname_geo = os.path.join(output_dir, f"{pair_name}_stage3_geo.parquet")
         df_geo.columns = pd.MultiIndex.from_product([[pair_name], df_geo.columns], names=['pair_id', 'feature'])
+        # FLATTEN
+        df_geo = flatten_columns(df_geo)
         df_geo.to_parquet(fname_geo)
         files_created.append(fname_geo)
         
@@ -358,6 +376,8 @@ def transform_pair_chunked_gpu(mouse_pair, body_parts_tracked, fps, output_dir, 
             
         fname_dyn = os.path.join(output_dir, f"{pair_name}_stage4_dyn.parquet")
         df_dyn.columns = pd.MultiIndex.from_product([[pair_name], df_dyn.columns], names=['pair_id', 'feature'])
+        # FLATTEN
+        df_dyn = flatten_columns(df_dyn)
         df_dyn.to_parquet(fname_dyn)
         files_created.append(fname_dyn)
         
@@ -397,6 +417,10 @@ def generate_features_gpu(df_wide_pandas, fps, output_dir, body_parts_map=None):
         feats = transform_single_gpu(single_mouse_gpu, available_parts, fps)
         
         feats.columns = pd.MultiIndex.from_product([[mouse], feats.columns], names=['mouse_id', 'feature'])
+        
+        # FIX: FLATTEN MultiIndex to String for Parquet
+        feats = flatten_columns(feats)
+        
         fname = os.path.join(output_dir, f"feats_single_{mouse}.parquet")
         feats.to_parquet(fname)
         saved_files.append(fname)
