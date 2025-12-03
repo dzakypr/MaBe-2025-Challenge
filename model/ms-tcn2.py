@@ -22,7 +22,7 @@ class DilatedResidualLayer(nn.Module):
 
 class SingleStageModel(nn.Module):
     # 2,4,8,16,32,64,128,512,1024,2048,4096
-    def __init__(self, num_layers=10, num_f_maps, dim, num_classes):
+    def __init__(self, num_layers, num_f_maps, dim, num_classes):
         super(SingleStageModel, self).__init__()
         
         self.conv_1x1 = nn.Conv1d(dim, num_f_maps, 1)
