@@ -81,7 +81,7 @@ def load_and_process_video(data_path, lab_id, video_id, n_mice, pixel_per_cm=Non
     # 1. Add missing body parts (NaN)
     if add_bp is not None:
         new_nan_parts_list = []
-        for m_id in range(1, n_mice+1):
+        for m_id in df_wide.columns.get_level_values(0).unique():
             for part in add_bp:
                 # Check using the tuple structure
                 if (m_id, part, 'x') in df_wide.columns:
