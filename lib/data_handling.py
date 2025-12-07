@@ -36,23 +36,28 @@ def tracked_body_parts():
     return tracked_body_parts
 
 def center_data_without_metadata(df_wide):
+    """
+    Centers the tracking data based on the cloud of points (Median/Percentiles).
+    This moves (0,0) to the geometric center of the arena.
+    """
+    # Now that levels are named, this works
     all_x = df_wide.xs('x', level='coords', axis=1).values.flatten()
     all_y = df_wide.xs('y', level='coords', axis=1).values.flatten()
 
+    # Robust Bounds (Percentiles ignore outliers/glitches)
     min_x = np.nanpercentile(all_x, 1)
     max_x = np.nanpercentile(all_x, 99)
-    
     min_y = np.nanpercentile(all_y, 1)
     max_y = np.nanpercentile(all_y, 99)
     
     center_x = (min_x + max_x) / 2
     center_y = (min_y + max_y) / 2
     
+    # In-place subtraction (Broadcasts correctly across MultiIndex)
     df_wide.loc[:, (slice(None), slice(None), 'x')] -= center_x
     df_wide.loc[:, (slice(None), slice(None), 'y')] -= center_y
     
     return df_wide
-
 
 def load_and_process_video(data_path, lab_id, video_id, n_mice, pixel_per_cm=None, add_bp=None, drop_bp=None):
     tracking_path = os.path.join(data_path, 'train_tracking', lab_id, f'{video_id}.parquet')
@@ -60,17 +65,29 @@ def load_and_process_video(data_path, lab_id, video_id, n_mice, pixel_per_cm=Non
         return None
 
     df_long = pd.read_parquet(tracking_path)
+    
+    # Pivot creates levels: [None (x/y), mouse_id, bodypart]
     df_wide = df_long.pivot(index="video_frame", columns=["mouse_id", "bodypart"], values=["x","y"])
+    
+    # Reorder to: [mouse_id, bodypart, x/y]
     df_wide.columns = df_wide.columns.swaplevel(0, 1)
     df_wide.columns = df_wide.columns.swaplevel(1, 2)
+    
+    # FIX: Explicitly name the levels so 'xs(level="coords")' works later
+    df_wide.columns.names = ['mouse_id', 'bodypart', 'coords']
+    
     df_wide = df_wide.sort_index(axis=1)
 
+    # 1. Add missing body parts (NaN)
     if add_bp is not None:
         new_nan_parts_list = []
         for m_id in range(1, n_mice+1):
             for part in add_bp:
-                if (m_id,part,'x') in df_wide.columns:
+                # Check using the tuple structure
+                if (m_id, part, 'x') in df_wide.columns:
                     continue
+                
+                # Create MultiIndex matching existing structure
                 nan_cols = pd.MultiIndex.from_product(
                     [[m_id], [part], ['x', 'y']],
                     names=df_wide.columns.names
@@ -82,15 +99,23 @@ def load_and_process_video(data_path, lab_id, video_id, n_mice, pixel_per_cm=Non
                     columns=nan_cols
                 )
                 new_nan_parts_list.append(part_df)
+        
         if new_nan_parts_list:
             df_wide = pd.concat([df_wide] + new_nan_parts_list, axis=1)
 
+    # 2. Drop unwanted body parts
     if drop_bp is not None:
         df_wide = df_wide.drop(columns=drop_bp, level='bodypart', errors='ignore')
+    
     df_wide = df_wide.sort_index(axis=1)
+
+    # 3. Unit Conversion (Pixels -> CM)
     if pixel_per_cm:
         df_wide = df_wide / pixel_per_cm
+        
+    # 4. Center Data (Data-Driven)
     df_wide = center_data_without_metadata(df_wide)
+    
     return df_wide
 
 def load_and_process_annotate(lab_id, video_id, path, inclusive=True):
