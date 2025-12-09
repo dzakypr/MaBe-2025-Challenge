@@ -501,7 +501,7 @@ def generate_features(df_wide, fps, output_dir, body_parts_map=None):
 
     # 1. Process Single Mice
     for mouse in mice_ids:
-        # print(f"Processing Mouse: {mouse}")
+        print(f"Processing Mouse: {mouse}")
         single_mouse_df = df_wide[mouse].copy()
         
         # Single feats are usually small enough to do in one go
