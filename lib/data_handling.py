@@ -59,7 +59,7 @@ def center_data_without_metadata(df_wide):
     
     return df_wide
 
-def load_and_process_video(data_path, lab_id, video_id, n_mice, pixel_per_cm=None, add_bp=None, drop_bp=None):
+def load_and_process_video(data_path, lab_id, video_id, valid_ids, pixel_per_cm=None, add_bp=None, drop_bp=None):
     tracking_path = os.path.join(data_path, 'train_tracking', lab_id, f'{video_id}.parquet')
     if not os.path.exists(tracking_path):
         return None
@@ -81,7 +81,7 @@ def load_and_process_video(data_path, lab_id, video_id, n_mice, pixel_per_cm=Non
     # 1. Add missing body parts (NaN)
     if add_bp is not None:
         new_nan_parts_list = []
-        for m_id in df_wide.columns.get_level_values(0).unique():
+        for m_id in valid_ids:
             for part in add_bp:
                 # Check using the tuple structure
                 if (m_id, part, 'x') in df_wide.columns:
