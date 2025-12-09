@@ -78,6 +78,9 @@ def load_and_process_video(data_path, lab_id, video_id, valid_ids, pixel_per_cm=
     
     df_wide = df_wide.sort_index(axis=1)
 
+    mask = df_wide.columns.get_level_values('mouse_id').isin(valid_ids)
+    df_wide = df_wide.loc[:, mask]
+
     # 1. Add missing body parts (NaN)
     if add_bp is not None:
         new_nan_parts_list = []
